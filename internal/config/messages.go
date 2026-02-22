@@ -1,6 +1,7 @@
 package config
 
-const  (
+const (
+	// Backend messages
 	Authentification = 'R'
 	ReadyForQuery    = 'Z'
 	ErrorResponse    = 'E'
@@ -17,5 +18,16 @@ const  (
 	CopyInResponse   = 'G'
 	CopyOutResponse  = 'H'
 	CopyBothResponse = 'W'
-)
 
+	// Frontend messages
+	ParseMessage     = 'P'
+	BindMessage      = 'B'
+	ExecuteMessage   = 'E'
+	DescribeMessage  = 'D'
+	SyncMessage      = 'S'
+	FlushMessage     = 'H'
+	CloseMessage     = 'C'
+	QueryMessage     = 'Q'
+	TerminateMessage = 'X'
+	PasswordMessage  = 'p'
+)

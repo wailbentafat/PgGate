@@ -2,6 +2,7 @@ package pool
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -45,17 +46,34 @@ func (p *Pool) createConn() (net.Conn, error) {
 }
 
 func (p *Pool) Get() (net.Conn, error) {
-	select {
-	case pooled := <-p.connections:
-		if !p.isConnAlive(pooled.Conn) {
-			pooled.Conn.Close()
-			return p.createConn()
+	maxRetries := 3
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case pooled := <-p.connections:
+			if !p.isConnAlive(pooled.Conn) {
+				pooled.Conn.Close()
+				conn, err := p.createConn()
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			} else {
+				pooled.lastUsed = time.Now()
+				return pooled.Conn, nil
+			}
+		default:
+			conn, err := p.createConn()
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
 		}
-		pooled.lastUsed = time.Now()
-		return pooled.Conn, nil
-	default:
-		return p.createConn()
+		if i < maxRetries-1 {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
+	return nil, fmt.Errorf("failed to get connection after %d retries: %w", maxRetries, lastErr)
 }
 
 func (p *Pool) Put(conn net.Conn) {
@@ -85,7 +103,7 @@ func (p *Pool) isConnAlive(conn net.Conn) bool {
 	if conn == nil {
 		return false
 	}
-	// i set here deadline for reading tcp content if i get any data without err i remove the deadline 
+	// i set here deadline for reading tcp content if i get any data without err i remove the deadline
 	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 	var b [1]byte
 	_, err := conn.Read(b[:0])
@@ -102,16 +120,17 @@ func (p *Pool) cleanupIdleConnections() {
 
 	for range ticker.C {
 		n := len(p.connections)
+	Loop:
 		for i := 0; i < n; i++ {
 			select {
 			case pooled := <-p.connections:
 				if time.Since(pooled.lastUsed) > p.idleTimeout {
 					pooled.Conn.Close()
 				} else {
-					p.connections <- pooled 
+					p.connections <- pooled
 				}
 			default:
-				break
+				break Loop
 			}
 		}
 	}

@@ -37,15 +37,29 @@ func (r *Router) Route(query string, inTransaction bool) Destination {
 		return Primary
 	}
 
+	if strings.HasPrefix(query, "WITH") {
+		if strings.Contains(query, "INSERT") ||
+			strings.Contains(query, "UPDATE") ||
+			strings.Contains(query, "DELETE") {
+			return Primary
+		}
+		return Replica
+	}
+
 	if strings.HasPrefix(query, "SELECT") && strings.Contains(query, "FOR UPDATE") {
 		return Primary
 	}
 
-	if strings.HasPrefix(query, "SELECT") {
+	if strings.HasPrefix(query, "SELECT") || strings.HasPrefix(query, "SHOW") {
 		return Replica
 	}
 
 	return Primary
+}
+
+func IsSessionModification(query string) bool {
+	query = strings.TrimSpace(strings.ToUpper(query))
+	return strings.HasPrefix(query, "SET") || strings.HasPrefix(query, "RESET")
 }
 
 func IsTransactionStart(query string) bool {

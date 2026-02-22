@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/user/pggate/internal/metrics"
 	"github.com/user/pggate/internal/proxy"
 )
 
@@ -21,17 +22,17 @@ type Server struct {
 	listener net.Listener
 	proxy    *proxy.Proxy
 
-	sem  chan struct{}   // connection limiter
-	wg   sync.WaitGroup  // graceful shutdown
-	quit chan struct{}   // stop signal
+	sem  chan struct{}  // connection limiter
+	wg   sync.WaitGroup // graceful shutdown
+	quit chan struct{}  // stop signal
 }
 
 func NewServer(cfg ListenerConfig, p *proxy.Proxy) *Server {
 	return &Server{
 		cfg:   cfg,
 		proxy: p,
-		sem:  make(chan struct{}, cfg.MaxConnections),
-		quit: make(chan struct{}),
+		sem:   make(chan struct{}, cfg.MaxConnections),
+		quit:  make(chan struct{}),
 	}
 }
 
@@ -49,7 +50,7 @@ func (s *Server) Start() error {
 		if err != nil {
 			select {
 			case <-s.quit:
-				return nil 
+				return nil
 			default:
 				log.Printf("accept error: %v", err)
 				continue
@@ -75,8 +76,10 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
+	metrics.IncActiveConnections()
 	defer s.wg.Done()
 	defer func() {
+		metrics.DecActiveConnections()
 		<-s.sem
 		_ = conn.Close()
 	}()

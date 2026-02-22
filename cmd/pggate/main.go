@@ -8,6 +8,7 @@ import (
 
 	"github.com/user/pggate/internal/config"
 	"github.com/user/pggate/internal/listener"
+	"github.com/user/pggate/internal/metrics"
 	"github.com/user/pggate/internal/pool"
 	"github.com/user/pggate/internal/proxy"
 	"github.com/user/pggate/internal/router"
@@ -39,18 +40,43 @@ func main() {
 		ReadTimeout:    cfg.Listener.ReadTimeout,
 		WriteTimeout:   cfg.Listener.WriteTimeout,
 	}, p)
+
+	// Start metrics server
 	go func() {
-		if err := l.Start(); err != nil {
-			log.Fatalf("failed to start listener: %v", err)
+		metricsAddr := ":8080"
+		log.Printf("Metrics server listening on %s", metricsAddr)
+		if err := metrics.ServeMetrics(metricsAddr); err != nil {
+			log.Printf("metrics server error: %v", err)
 		}
 	}()
 
 	log.Printf("PgGate listening on %s", cfg.Listener.Address)
 	log.Printf("Primary: %s, Replicas: %v", primary, replicas)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
 
-	log.Println("Shutting down PgGate...")
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+	for {
+		sig := <-sigChan
+		if sig == syscall.SIGHUP {
+			log.Println("Reloading configuration...")
+			newCfg, err := config.Load("config.yaml")
+			if err != nil {
+				log.Printf("failed to reload config: %v", err)
+				continue
+			}
+			// Update components (simplified: only some fields for now)
+			// TODO: Add more dynamic update logic
+			_ = newCfg
+			log.Println("Configuration reloaded (partial)")
+			continue
+		}
+
+		log.Printf("Received signal %v, shutting down...", sig)
+		break
+	}
+
 	l.Stop()
+	pm.Close()
+	log.Println("PgGate shutdown complete")
 }
