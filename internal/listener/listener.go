@@ -1,13 +1,15 @@
 package listener
 
 import (
-	"log"
+	"context"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/user/pggate/internal/logging"
 	"github.com/user/pggate/internal/metrics"
 	"github.com/user/pggate/internal/proxy"
+	"github.com/user/pggate/internal/ratelimit"
 )
 
 type ListenerConfig struct {
@@ -18,21 +20,23 @@ type ListenerConfig struct {
 }
 
 type Server struct {
-	cfg      ListenerConfig
-	listener net.Listener
-	proxy    *proxy.Proxy
+	cfg         ListenerConfig
+	listener    net.Listener
+	proxy       *proxy.Proxy
+	rateLimiter *ratelimit.IPRateLimiter
 
-	sem  chan struct{}  // connection limiter
-	wg   sync.WaitGroup // graceful shutdown
-	quit chan struct{}  // stop signal
+	sem  chan struct{}
+	wg   sync.WaitGroup
+	quit chan struct{}
 }
 
-func NewServer(cfg ListenerConfig, p *proxy.Proxy) *Server {
+func NewServer(cfg ListenerConfig, p *proxy.Proxy, rl *ratelimit.IPRateLimiter) *Server {
 	return &Server{
-		cfg:   cfg,
-		proxy: p,
-		sem:   make(chan struct{}, cfg.MaxConnections),
-		quit:  make(chan struct{}),
+		cfg:         cfg,
+		proxy:       p,
+		rateLimiter: rl,
+		sem:         make(chan struct{}, cfg.MaxConnections),
+		quit:        make(chan struct{}),
 	}
 }
 
@@ -43,7 +47,8 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	log.Printf("Listener started on %s", s.cfg.Address)
+	log := logging.L()
+	log.Info("listener started", "address", s.cfg.Address)
 
 	for {
 		conn, err := s.listener.Accept()
@@ -52,27 +57,60 @@ func (s *Server) Start() error {
 			case <-s.quit:
 				return nil
 			default:
-				log.Printf("accept error: %v", err)
+				log.Error("accept error", "error", err)
 				continue
 			}
 		}
 
-		s.sem <- struct{}{}
-		s.wg.Add(1)
+		// Rate limiting
+		if s.rateLimiter != nil {
+			ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			if !s.rateLimiter.Allow(ip) {
+				metrics.RateLimitRejections.Inc()
+				log.Warn("rate limit exceeded", "ip", ip)
+				conn.Close()
+				continue
+			}
+		}
 
+		// Connection limit
+		select {
+		case s.sem <- struct{}{}:
+		default:
+			log.Warn("max connections reached, rejecting", "remote", conn.RemoteAddr())
+			metrics.IncErrors("max_connections")
+			conn.Close()
+			continue
+		}
+
+		s.wg.Add(1)
 		go s.handleConnection(conn)
 	}
 }
 
-func (s *Server) Stop() {
+func (s *Server) Stop(timeout time.Duration) {
+	log := logging.L()
 	close(s.quit)
 
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
 
-	s.wg.Wait()
-	log.Println("Listener stopped")
+	// Wait for existing connections with timeout
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Info("all connections drained")
+	case <-time.After(timeout):
+		log.Warn("shutdown timeout reached, forcing close", "timeout", timeout)
+	}
+
+	log.Info("listener stopped")
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -84,10 +122,27 @@ func (s *Server) handleConnection(conn net.Conn) {
 		_ = conn.Close()
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
-	_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
+	if s.cfg.ReadTimeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))
+	}
+	if s.cfg.WriteTimeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
+	}
 
-	log.Printf("Accepted connection from %s", conn.RemoteAddr())
+	log := logging.L()
+	log.Debug("accepted connection", "remote", conn.RemoteAddr())
 
-	s.proxy.HandleClient(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancel context when quit signal is received
+	go func() {
+		select {
+		case <-s.quit:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	s.proxy.HandleClient(ctx, conn)
 }

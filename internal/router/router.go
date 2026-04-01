@@ -13,11 +13,21 @@ const (
 	Replica
 )
 
+func (d Destination) String() string {
+	if d == Primary {
+		return "primary"
+	}
+	return "replica"
+}
+
 type Router struct {
+	cache *routeCache
 }
 
 func NewRouter() *Router {
-	return &Router{}
+	return &Router{
+		cache: newRouteCache(4096),
+	}
 }
 
 func (r *Router) Route(query string, inTransaction bool) Destination {
@@ -25,17 +35,33 @@ func (r *Router) Route(query string, inTransaction bool) Destination {
 		return Primary
 	}
 
+	// Check cache by fingerprint
+	fingerprint, fpErr := pg_query.Fingerprint(query)
+	if fpErr == nil {
+		if dest, ok := r.cache.Get(fingerprint); ok {
+			return dest
+		}
+	}
+
 	result, err := pg_query.Parse(query)
 	if err != nil {
 		return Primary // unparseable → safe default
 	}
 
+	dest := Replica
 	for _, stmt := range result.Stmts {
 		if isWriteStatement(stmt.Stmt) {
-			return Primary
+			dest = Primary
+			break
 		}
 	}
-	return Replica
+
+	// Cache the result
+	if fpErr == nil {
+		r.cache.Put(fingerprint, dest)
+	}
+
+	return dest
 }
 
 func isWriteStatement(node *pg_query.Node) bool {
@@ -96,7 +122,6 @@ func isWriteStatement(node *pg_query.Node) bool {
 func IsSessionModification(query string) bool {
 	result, err := pg_query.Parse(query)
 	if err != nil {
-		// Fallback to string matching for unparseable queries
 		query = strings.TrimSpace(strings.ToUpper(query))
 		return strings.HasPrefix(query, "SET") || strings.HasPrefix(query, "RESET")
 	}
@@ -119,7 +144,6 @@ func IsTransactionStart(query string) bool {
 
 	for _, stmt := range result.Stmts {
 		if ts, ok := stmt.Stmt.Node.(*pg_query.Node_TransactionStmt); ok {
-			// BEGIN or START TRANSACTION
 			return ts.TransactionStmt.Kind == pg_query.TransactionStmtKind_TRANS_STMT_BEGIN ||
 				ts.TransactionStmt.Kind == pg_query.TransactionStmtKind_TRANS_STMT_START
 		}

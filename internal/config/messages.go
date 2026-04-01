@@ -30,4 +30,8 @@ const (
 	QueryMessage     = 'Q'
 	TerminateMessage = 'X'
 	PasswordMessage  = 'p'
+	CopyFail         = 'f'
+
+	// Max message size: 64MB. Prevents OOM from malicious length headers.
+	MaxMessageSize = 64 * 1024 * 1024
 )

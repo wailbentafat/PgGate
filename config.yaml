@@ -13,3 +13,25 @@ backend:
 pool:
   primary_size: 10
   replica_size: 20
+  idle_timeout: 60s
+  cleanup_interval: 30s
+  query_timeout: 30s
+  max_replica_lag: 0  # seconds; 0 disables lag check. e.g. 30 = skip replicas >30s behind
+
+tls:
+  enabled: false
+  # cert_file: "/path/to/server.crt"
+  # key_file: "/path/to/server.key"
+  # ca_file: "/path/to/ca.crt"
+
+metrics:
+  address: ":8080"
+
+logging:
+  level: "info"    # debug, info, warn, error
+  format: "json"   # json, text
+
+rate_limit:
+  enabled: false
+  requests_per_sec: 1000
+  burst: 100
